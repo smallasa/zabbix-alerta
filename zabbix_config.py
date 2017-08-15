@@ -6,7 +6,7 @@
 import sys
 import logging
 
-from pyzabbix import ZabbixAPI
+from pyzabbix import ZabbixAPI, ZabbixAPIException
 
 
 # debug logging
@@ -28,25 +28,59 @@ ALERTA_API_URL = 'http://alerta/api'  # dockerized hostname
 ALERTA_API_KEY = None
 ALERTA_PROFILE = None  # 'production'
 
+
+# media type
+EMAIL = 0
+SCRIPT = 1
+SMS = 2
+JABBER = 3
+EZ_TEXTING = 100
+
+# use if severity
+NIWAHD = 63
+
 # status
 ENABLED = 0
 DISABLED = 1
 
-# priority
+# eventsource
+TRIGGERS = 0
 
+# operation type
+SEND_MESSAGE = 0
+
+# default msg
+USE_DATA_FROM_OPERATION = 0
+USE_DATA_FROM_ACTION = 1
+
+# maintenance mode
+DO_NOT_PAUSE_EXEC = 0
+PAUSE_EXECUTION = 1
+
+# host
+DEFAULT = 1
+AGENT = 1
+
+CONNECT_USING_DNS = 0
+CONNECT_USING_IP = 1
 
 # item type
 ZABBIX_TRAPPER = 2
 
-
 # item value type
 TEXT = 4
 
-EVENT_TRIGGER = 0
+# priority
+NOT_CLASSIFIED = 0
+INFORMATION = 1
+WARNING = 2
+AVERAGE = 3
+HIGH = 4
+DISASTER = 5
 
-SEND_MESSAGE = 0
-
-NO_PAUSE_ESC = 0
+# trigger type
+DO_NOT_GENERATE_MULTIPLE_EVENTS = 0
+GENERATE_MULTIPLE_EVENTS = 1
 
 
 class ZabbixConfig(object):
@@ -59,25 +93,23 @@ class ZabbixConfig(object):
 
     def create_action(self, api_url, api_key=None, profile=None):
 
+        use_zabbix_severity = False
+        use_console_link = True
+
         medias = self.zapi.mediatype.get(output='extend')
         try:
             media_id = [m for m in medias if m['description'] == 'Alerta'][0]['mediatypeid']
         except Exception:
             print('media does not exist. creating...')
-            r = self.zapi.mediatype.create(
-                type=1,
+            response = self.zapi.mediatype.create(
+                type=SCRIPT,
                 description='Alerta',
                 exec_path='zabbix-alerta',
                 exec_params='{ALERT.SENDTO}\n{ALERT.SUBJECT}\n{ALERT.MESSAGE}\n',
                 maxattempts='5',
                 attempt_interval='5s'
             )
-            media_id = r['mediatypeids'][0]
-
-        # user_groups = zapi.usergroup.get()
-        # print(user_groups)
-        # admin_group_id = [g for g in user_groups if g['name'] == 'Zabbix administrators'][0]['usrgrpid']
-        # print(admin_group_id)
+            media_id = response['mediatypeids'][0]
 
         users = self.zapi.user.get(output='extend')
         admin_user_id = [g for g in users if g['alias'] == 'Admin'][0]['userid']
@@ -87,23 +119,19 @@ class ZabbixConfig(object):
             'mediatypeid': media_id,
             'sendto': sendto,
             'active': ENABLED,
-            'severity': 63,
+            'severity': NIWAHD,
             'period': '1-7,00:00-24:00'
         }
-        r = self.zapi.user.updatemedia(
-            users={"userid": admin_user_id},
-            medias=media_alerta
-        )
-        # print(r)
-        # print(zapi.user.get(output='extend'))
 
-        self.zapi.action.get(
-            output='extend',
-            selectOperations='extend',
-            selectRecoveryOptions='extend'
-        )
+        try:
+            self.zapi.user.updatemedia(
+                users={"userid": admin_user_id},
+                medias=media_alerta
+            )
+        except ZabbixAPIException as e:
+            print(e)
+            sys.exit()
 
-        use_zabbix_severity = False
         default_message = (
             "resource={HOST.NAME1}\r\n"
             "event={ITEM.KEY1}\r\n"
@@ -119,53 +147,51 @@ class ZabbixConfig(object):
             "attributes.ip={HOST.IP1}\r\n"
             "attributes.thresholdInfo={TRIGGER.TEMPLATE.NAME}: {TRIGGER.EXPRESSION}\r\n"
             "type=zabbixAlert\r\n"
-            "dateTime={EVENT.DATE}T{EVENT.TIME}Z"
+            "dateTime={EVENT.DATE}T{EVENT.TIME}Z\r\n"
         )
 
-        print(default_message)
-
+        operations_console_link = 'attributes.moreInfo=<a href="%s/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}" target="_blank">Zabbix console</a>' % ZABBIX_API_URL
         operations = {
             "operationtype": SEND_MESSAGE,
             "opmessage": {
-                "default_msg": 1,
+                "default_msg": USE_DATA_FROM_OPERATION,
                 "mediatypeid": media_id,
                 "subject": "{TRIGGER.STATUS}: {TRIGGER.NAME}",
-                "message": default_message
+                "message": default_message + operations_console_link if use_console_link else ''
             },
             "opmessage_usr": [
                 {
-                    "operationid": "15",
-                    "userid": "1"
+                    "userid": admin_user_id
                 }
             ]
         }
 
+        recovery_console_link = 'attributes.moreInfo=<a href="%s/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.RECOVERY.ID}" target="_blank">Zabbix console</a>' % ZABBIX_API_URL
         recovery_operations = {
-            "operationtype": 0,
+            "operationtype": SEND_MESSAGE,
             "opmessage": {
-                "default_msg": 1,
+                "default_msg": USE_DATA_FROM_OPERATION,
                 "mediatypeid": media_id,
                 "subject": "{TRIGGER.STATUS}: {TRIGGER.NAME}",
-                "message": default_message
+                "message": default_message + recovery_console_link if use_console_link else ''
             },
             "opmessage_usr": [
                 {
-                    "operationid": "15",
-                    "userid": "1"
+                    "userid": admin_user_id
                 }
             ]
         }
 
         self.zapi.action.create(
             name='Forward to Alerta',
-            eventsource=0,
+            eventsource=TRIGGERS,
             status=ENABLED,
             esc_period=120,
             def_shortdata="{TRIGGER.NAME}: {TRIGGER.STATUS}",
             def_longdata=default_message,
             r_shortdata="{TRIGGER.NAME}: {TRIGGER.STATUS}",
             r_longdata=default_message,
-            maintenance_mode=0,
+            maintenance_mode=DO_NOT_PAUSE_EXEC,
             operations=[operations],
             recovery_operations=[recovery_operations]
         )
@@ -176,6 +202,7 @@ class ZabbixConfig(object):
         hosts = self.zapi.host.get()
         zabbix_server_id = [h for h in hosts if h['name'] == 'Zabbix server'][0]['hostid']
 
+        # enable zabbix server monitoring
         self.zapi.host.update(hostid=zabbix_server_id, status=0)
 
         HOSTS = [
@@ -195,16 +222,16 @@ class ZabbixConfig(object):
             return [t for t in templates if t['name'] == name][0]['templateid']
 
         # self.zapi.item.get(output=['key_'])
-        self.zapi.trigger.get(output='extend')
+        # self.zapi.trigger.get(output='extend')
 
         for h in HOSTS:
             r = self.zapi.host.create(
                 host=h['name'],
                 interfaces=[
                     {
-                        "type": 1,
-                        "main": 1,
-                        "useip": 0,
+                        "type": AGENT,
+                        "main": DEFAULT,
+                        "useip": CONNECT_USING_DNS,
                         "ip": "",
                         "dns": h['dns'],
                         "port": "10050"
@@ -227,8 +254,8 @@ class ZabbixConfig(object):
                 hostid=host_id,
                 description='Timestamp has changed on {HOST.NAME}',
                 expression='{%s:test.timestamp.diff()}>0' % h['name'],
-                type=1,
-                priority=4,
+                type=GENERATE_MULTIPLE_EVENTS,
+                priority=HIGH,
                 status=ENABLED
             )
 
