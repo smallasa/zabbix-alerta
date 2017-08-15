@@ -18,7 +18,8 @@ setup(
     ],
     install_requires=[
         'alerta',
-        'pyzabbix'
+        'pyzabbix',
+        'protobix'
     ],
     include_package_data=True,
     zip_safe=True,

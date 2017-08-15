@@ -4,7 +4,10 @@
 """
 
 import sys
+import time
 import logging
+
+import protobix
 
 from pyzabbix import ZabbixAPI, ZabbixAPIException
 
@@ -19,6 +22,7 @@ log.setLevel(logging.DEBUG)
 __version__ = '3.4.0'
 
 # command-line params
+ZABBIX_SERVER = 'localhost'
 ZABBIX_API_URL = "http://localhost:10080"
 ZABBIX_API_USER = 'Admin'
 ZABBIX_API_PASSWORD = 'zabbix'
@@ -196,75 +200,68 @@ class ZabbixConfig(object):
             recovery_operations=[recovery_operations]
         )
 
-    def test_hosts(self):
-        # docker setup specific for testing only
+    def test_action(self):
 
         hosts = self.zapi.host.get()
         zabbix_server_id = [h for h in hosts if h['name'] == 'Zabbix server'][0]['hostid']
 
         # enable zabbix server monitoring
-        self.zapi.host.update(hostid=zabbix_server_id, status=0)
+        self.zapi.host.update(hostid=zabbix_server_id, status=ENABLED)
 
-        HOSTS = [
-            {'name': "Zabbix web", 'dns': 'zabbix-web', 'template': 'Template App Zabbix Server'},
-            {'name': "Zabbix agent", 'dns': 'zabbix-agent', 'template': 'Template App Zabbix Agent'},
-            {'name': "MySQL server", 'dns': 'mysql-server', 'template': 'Template App MySQL'},
-            {'name': "Alerta server", 'dns': 'alerta', 'template': 'Template App HTTP Service'},
-            {'name': "MongoDB server", 'dns': 'db', 'template': 'Template ICMP Ping'}
-        ]
-
-        hostgroups = self.zapi.hostgroup.get()
-        linux_hostgroup_id = [hg for hg in hostgroups if hg['name'] == 'Linux servers'][0]['groupid']
-
-        templates = self.zapi.template.get()
-
-        def get_template_id(name):
-            return [t for t in templates if t['name'] == name][0]['templateid']
-
-        # self.zapi.item.get(output=['key_'])
-        # self.zapi.trigger.get(output='extend')
-
-        for h in HOSTS:
-            r = self.zapi.host.create(
-                host=h['name'],
-                interfaces=[
-                    {
-                        "type": AGENT,
-                        "main": DEFAULT,
-                        "useip": CONNECT_USING_DNS,
-                        "ip": "",
-                        "dns": h['dns'],
-                        "port": "10050"
-                    }
-                ],
-                groups=[{"groupid": linux_hostgroup_id}],
-                templates=[{"templateid": get_template_id(h['template'])}]
-            )
-            host_id = r['hostids'][0]
-
-            self.zapi.item.create(
-                name='Timestamp delta (test)',
+        try:
+            response = self.zapi.item.create(
+                name='Zabbix-Alerta Integration Test',
                 type=ZABBIX_TRAPPER,
-                key_='test.timestamp',
+                key_='test.alerta',
                 value_type=TEXT,
-                hostid=host_id,
+                hostid=zabbix_server_id,
                 status=ENABLED
             )
-            self.zapi.trigger.create(
-                hostid=host_id,
-                description='Timestamp has changed on {HOST.NAME}',
-                expression='{%s:test.timestamp.diff()}>0' % h['name'],
+            print(response)
+            item_id = response['itemids'][0]
+
+            response = self.zapi.trigger.create(
+                hostid=zabbix_server_id,
+                description='Zabbix triggered event on {HOST.NAME} (Test only)',
+                expression='{Zabbix server:test.alerta.diff()}>0',
                 type=GENERATE_MULTIPLE_EVENTS,
                 priority=HIGH,
                 status=ENABLED
             )
+            print(response)
+            trigger_id = response['triggerids'][0]
+        except ZabbixAPIException:
+            item_id = None
+            trigger_id = None
+
+        cfg = protobix.ZabbixAgentConfig()
+        cfg.server_active = ZABBIX_SERVER
+        zbx = protobix.DataContainer(cfg)
+
+        zbx.data_type = 'items'
+        zbx.add_item(host='Zabbix server', key='test.alerta', value='??')
+        response = zbx.send()
+        print(response)
+
+        time.sleep(5)
+
+        zbx.data_type = 'items'
+        zbx.add_item(host='Zabbix server', key='test.alerta', value='OK')
+        response = zbx.send()
+        print(response)
+
+        try:
+            self.zapi.trigger.delete(trigger_id)
+            self.zapi.item.delete(item_id)
+        except ZabbixAPIException:
+            pass
 
 
 def main():
 
     zc = ZabbixConfig(ZABBIX_API_URL, user=ZABBIX_API_USER, password=ZABBIX_API_PASSWORD)
     zc.create_action(ALERTA_API_URL, ALERTA_API_KEY, ALERTA_PROFILE)
-    zc.test_hosts()
+    zc.test_action()
 
 if __name__ == '__main__':
     main()
